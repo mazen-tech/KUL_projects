@@ -1,69 +1,102 @@
 #include <iostream>
+#include <stdexcept>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <unistd.h>
-#include <cstring>
-#include <thread>
-#include "exec.h"
+#include <arpa/inet.h>
+
+using namespace std;
+
+string exec(const char* cmd) {
+    char buffer[128];
+    string result = "";
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) throw runtime_error("popen() failed!");
+    try {
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            result += buffer;
+        }
+    } catch (...) {
+        pclose(pipe);
+        throw;
+    }
+    pclose(pipe);
+    return result;
+}
 
 void handleClient(int clientSocket) {
-    char buffer[256];
-    
-    // Receive command from client
-    int n = read(clientSocket, buffer, 255);
-    if (n < 0) {
-        std::cerr << "Error reading from socket\n";
-        return;
+    char buffer[1024];
+    while (true) {
+        ssize_t bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+        if (bytesReceived <= 0) break;
+
+        buffer[bytesReceived] = '\0';
+
+        string command(buffer);
+        cout << "Received command: " << command << endl;
+
+        try {
+            string result = exec(command.c_str());
+            send(clientSocket, result.c_str(), result.size(), 0);
+        } catch (const exception& e) {
+            string errorMsg = "Error executing command: " + string(e.what());
+            send(clientSocket, errorMsg.c_str(), errorMsg.size(), 0);
+        }
     }
 
-    // Null-terminate the received string
-    buffer[n] = '\0';
-    std::cout << "Command received: " << buffer << std::endl;
-
-    // Execute the command and get the output
-    std::string result = exec(buffer);
-
-    // Send back the result to the client
-    n = write(clientSocket, result.c_str(), result.length());
-    if (n < 0) {
-        std::cerr << "Error writing to socket\n";
-        return;
-    }
-
-    close(clientSocket);  // Close the connection
+    close(clientSocket);
+    cout << "Client disconnected." << endl;
 }
 
 int main() {
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket < 0) {
-        std::cerr << "Failed to create socket\n";
-        return 1;
+    if (serverSocket == -1) {
+        cerr << "Socket creation failed!" << endl;
+        return -1;
     }
 
+    // Configure server address and bind to port
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(8080);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(12345);
 
-    if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        std::cerr << "Failed to bind socket\n";
-        return 1;
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
+        cerr << "Bind failed!" << endl;
+        close(serverSocket);
+        return -1;
     }
 
-    listen(serverSocket, 5);
-    std::cout << "Server is listening on port 12345...\n";
+    if (listen(serverSocket, SOMAXCONN) == -1) {
+        cerr << "Listen failed!" << endl;
+        close(serverSocket);
+        return -1;
+    }
 
+    cout << "Server listening on port 8080..." << endl;
+    vector<thread> threads;
     while (true) {
-        int clientSocket = accept(serverSocket, nullptr, nullptr);
-        if (clientSocket < 0) {
-            std::cerr << "Failed to accept connection\n";
+        sockaddr_in clientAddr;
+        socklen_t clientSize = sizeof(clientAddr);
+        int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientSize);
+        if (clientSocket == -1) {
+            cerr << "Accept failed!" << endl;
             continue;
         }
 
-        std::thread clientThread(handleClient, clientSocket);
-        clientThread.detach();  // Handle client in a new thread
+        cout << "Client connected!" << endl;
+        threads.emplace_back(thread(handleClient, clientSocket));
     }
 
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
     close(serverSocket);
     return 0;
 }
+
